@@ -6,12 +6,12 @@ use std::{
 };
 
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
-use clap::{Args, Parser};
+use clap::Parser;
 
 #[derive(Parser)]
 struct Cli {
-	#[command(flatten)]
-	from_to: FromTo,
+	#[arg(long, short)]
+	decode: bool,
 	/// When encountering an unknown character, encode it as "- - . - - "
 	#[arg(long, short)]
 	unknown: bool,
@@ -20,48 +20,31 @@ struct Cli {
 	stop: bool,
 }
 
-#[derive(Args)]
-#[group(required = false, multiple = false)]
-struct FromTo {
-	/// convert to utf-8 from morse
-	#[arg(long, short, default_value_t = false)]
-	from: bool,
-
-	/// convert from utf-8 to morse (default)
-	#[arg(long, short, default_value_t = false)]
-	to: bool,
-}
-
 fn main() -> std::io::Result<()> {
 	let cli = Cli::parse();
 
-	match (cli.from_to.from, cli.from_to.to) {
-		// convert from morse to utf-8
-		(true, false) => {
-			let signals = ByteSignalReader::new(stdin())
-				.collect::<std::io::Result<Vec<Signal>>>()?;
-			let str_from_signals = SignalsToCharIterator::new(signals.into_iter())
-				.collect::<std::io::Result<String>>()?;
-			println!("{}", str_from_signals);
-			Ok(())
-		}
-		// convert to morse from utf-8
-		(false, true) | (false, false) => {
-			let mut s = String::new();
-			stdin().read_to_string(&mut s)?;
+	// decode morse into utf-8
+	if cli.decode {
+		let signals = ByteSignalReader::new(stdin())
+			.collect::<std::io::Result<Vec<Signal>>>()?;
+		let str_from_signals = SignalsToCharIterator::new(signals.into_iter())
+			.collect::<std::io::Result<String>>()?;
+		println!("{}", str_from_signals);
+		Ok(())
+	}
+	// encode utf-8 to morse
+	else {
+		let mut s = String::new();
+		stdin().read_to_string(&mut s)?;
 
-			if cli.stop {
-				let stop_re =
-					regex::Regex::new(r"([^\s])(\. |\n+)").expect("invalid regex");
-				s = stop_re.replace_all(&s, "$1 STOP ").to_string();
-			}
+		if cli.stop {
+			let stop_re =
+				regex::Regex::new(r"([^\s])(\. |\n+)").expect("invalid regex");
+			s = stop_re.replace_all(&s, "$1 STOP ").to_string();
+		}
 
-			CharToSignalIterator::new(s.chars(), !cli.unknown).write(stdout())?;
-			Ok(())
-		}
-		(_, _) => {
-			unreachable!();
-		}
+		CharToSignalIterator::new(s.chars(), !cli.unknown).write(stdout())?;
+		Ok(())
 	}
 }
 
