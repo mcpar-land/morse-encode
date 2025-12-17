@@ -6,58 +6,53 @@ use std::{
 };
 
 use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter};
+use clap::{Args, Parser};
+
+#[derive(Parser)]
+struct Cli {
+	#[command(flatten)]
+	from_to: FromTo,
+	/// When encountering an unknown character, encode it as "- - . - - "
+	#[arg(long, short)]
+	unknown: bool,
+}
+
+#[derive(Args)]
+#[group(required = false, multiple = false)]
+struct FromTo {
+	/// convert to utf-8 from morse
+	#[arg(long, short, default_value_t = false)]
+	from: bool,
+
+	/// convert from utf-8 to morse (default)
+	#[arg(long, short, default_value_t = false)]
+	to: bool,
+}
 
 fn main() -> std::io::Result<()> {
-	let mut s = String::new();
-	stdin().read_to_string(&mut s)?;
+	let cli = Cli::parse();
 
-	CharToSignalIterator::new(s.chars()).write(stdout())?;
-
-	Ok(())
-
-	// let test_str = "12345 The hungry purple dinosaur ate the kind zingy fox, the jabbering crab, and the mad whale and started vending and quacking 67890";
-
-	// println!("{}", test_str);
-
-	// let signals_from_str =
-	// 	CharToSignalIterator::new(test_str.chars()).collect::<Vec<Signal>>();
-	// println!(
-	// 	"{} ({})",
-	// 	signals_to_string(signals_from_str.iter()),
-	// 	signals_from_str.len()
-	// );
-
-	// let mut signals_bytes = Vec::<u8>::new();
-
-	// CharToSignalIterator::new(test_str.chars()).write(&mut signals_bytes)?;
-
-	// println!("{:x?}", signals_bytes);
-
-	// let mut signals_from_bytes = Vec::<Signal>::new();
-	// for signal in ByteSignalReader::new(Cursor::new(&signals_bytes)) {
-	// 	match signal {
-	// 		Ok(signal) => signals_from_bytes.push(signal),
-	// 		Err(err) => {
-	// 			println!("{}", err);
-	// 			break;
-	// 		}
-	// 	}
-	// }
-
-	// println!(
-	// 	"{} ({})",
-	// 	signals_to_string(signals_from_bytes.iter()),
-	// 	signals_from_bytes.len()
-	// );
-
-	// let str_from_signals =
-	// 	SignalsToCharIterator::new(signals_from_bytes.into_iter())
-	// 		.collect::<std::io::Result<String>>()?;
-
-	// println!("{}", str_from_signals);
-	// println!("{:x?}", str_from_signals.as_bytes());
-
-	// Ok(())
+	match (cli.from_to.from, cli.from_to.to) {
+		// convert from morse to utf-8
+		(true, false) => {
+			let signals = ByteSignalReader::new(stdin())
+				.collect::<std::io::Result<Vec<Signal>>>()?;
+			let str_from_signals = SignalsToCharIterator::new(signals.into_iter())
+				.collect::<std::io::Result<String>>()?;
+			println!("{}", str_from_signals);
+			Ok(())
+		}
+		// convert to morse from utf-8
+		(false, true) | (false, false) => {
+			let mut s = String::new();
+			stdin().read_to_string(&mut s)?;
+			CharToSignalIterator::new(s.chars(), !cli.unknown).write(stdout())?;
+			Ok(())
+		}
+		(_, _) => {
+			unreachable!();
+		}
+	}
 }
 
 const DOT_LENGTH: usize = 1;
@@ -189,14 +184,16 @@ impl<R: std::io::Read> Iterator for BitIterator<R> {
 
 pub struct CharToSignalIterator<I: Iterator<Item = char>> {
 	inner: I,
+	skip_unrecognized: bool,
 	has_sent_letter: bool,
 	buf: VecDeque<Signal>,
 }
 
 impl<I: Iterator<Item = char>> CharToSignalIterator<I> {
-	pub fn new(inner: I) -> Self {
+	pub fn new(inner: I, skip_unrecognized: bool) -> Self {
 		CharToSignalIterator {
 			inner,
+			skip_unrecognized,
 			has_sent_letter: false,
 			buf: VecDeque::new(),
 		}
@@ -220,73 +217,84 @@ impl<I: Iterator<Item = char>> Iterator for CharToSignalIterator<I> {
 
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.buf.len() == 0 {
-			if let Some(c) = self.inner.next() {
-				match c {
-					' ' => {
-						self.buf.push_back(Signal::WordGap);
-						self.has_sent_letter = false;
-					}
-					c => {
-						if self.has_sent_letter {
-							self.buf.push_back(Signal::LongGap);
+			loop {
+				if let Some(c) = self.inner.next() {
+					match c {
+						' ' => {
+							if self.has_sent_letter {
+								self.buf.push_back(Signal::WordGap);
+								self.has_sent_letter = false;
+								break;
+							}
 						}
-						for s in
-							itertools::intersperse(char_to_signals(c).iter(), &Signal::Gap)
-						{
-							self.buf.push_back(*s);
+						c => {
+							let (char_signals, recognized) = char_to_signals(c);
+							let should_skip = self.skip_unrecognized && !recognized;
+							if should_skip {
+								continue;
+							}
+							if self.has_sent_letter {
+								self.buf.push_back(Signal::LongGap);
+							}
+							for s in itertools::intersperse(char_signals.iter(), &Signal::Gap)
+							{
+								self.buf.push_back(*s);
+							}
+							self.has_sent_letter = true;
+							break;
 						}
-						self.has_sent_letter = true;
 					}
+				} else {
+					return None;
 				}
-			} else {
-				return None;
 			}
 		}
 		let item = self.buf.pop_front().expect("buf should not be empty here");
+		eprint!("{}", item);
 		Some(item)
 	}
 }
 
-pub fn char_to_signals(c: char) -> &'static [Signal] {
+fn char_to_signals(c: char) -> (&'static [Signal], bool) {
 	use Signal::{Dash, Dot};
 	match c {
-		'A' | 'a' => &[Dot, Dash],
-		'B' | 'b' => &[Dash, Dot, Dot, Dot],
-		'C' | 'c' => &[Dash, Dot, Dash, Dot],
-		'D' | 'd' => &[Dash, Dot, Dot],
-		'E' | 'e' => &[Dot],
-		'F' | 'f' => &[Dot, Dot, Dash, Dot],
-		'G' | 'g' => &[Dash, Dash, Dot],
-		'H' | 'h' => &[Dot, Dot, Dot, Dot],
-		'I' | 'i' => &[Dot, Dot],
-		'J' | 'j' => &[Dot, Dash, Dash, Dash],
-		'K' | 'k' => &[Dash, Dot, Dash],
-		'L' | 'l' => &[Dot, Dash, Dot, Dot],
-		'M' | 'm' => &[Dash, Dash],
-		'N' | 'n' => &[Dash, Dot],
-		'O' | 'o' => &[Dash, Dash, Dash],
-		'P' | 'p' => &[Dot, Dash, Dash, Dot],
-		'Q' | 'q' => &[Dash, Dash, Dot, Dash],
-		'R' | 'r' => &[Dot, Dash, Dot],
-		'S' | 's' => &[Dot, Dot, Dot],
-		'T' | 't' => &[Dash],
-		'U' | 'u' => &[Dot, Dot, Dash],
-		'V' | 'v' => &[Dot, Dot, Dot, Dash],
-		'W' | 'w' => &[Dot, Dash, Dash],
-		'X' | 'x' => &[Dash, Dot, Dot, Dash],
-		'Y' | 'y' => &[Dash, Dot, Dash, Dash],
-		'Z' | 'z' => &[Dash, Dash, Dot, Dot],
-		'1' => &[Dot, Dash, Dash, Dash, Dash],
-		'2' => &[Dot, Dot, Dash, Dash, Dash],
-		'3' => &[Dot, Dot, Dot, Dash, Dash],
-		'4' => &[Dot, Dot, Dot, Dot, Dash],
-		'5' => &[Dot, Dot, Dot, Dot, Dot],
-		'6' => &[Dash, Dot, Dot, Dot, Dot],
-		'7' => &[Dash, Dash, Dot, Dot, Dot],
-		'8' => &[Dash, Dash, Dash, Dot, Dot],
-		'9' => &[Dash, Dash, Dash, Dash, Dot],
-		'0' => &[Dash, Dash, Dash, Dash, Dash],
-		_ => &[Dash, Dash, Dot, Dash, Dash],
+		'A' | 'a' => (&[Dot, Dash], true),
+		'B' | 'b' => (&[Dash, Dot, Dot, Dot], true),
+		'C' | 'c' => (&[Dash, Dot, Dash, Dot], true),
+		'D' | 'd' => (&[Dash, Dot, Dot], true),
+		'E' | 'e' => (&[Dot], true),
+		'F' | 'f' => (&[Dot, Dot, Dash, Dot], true),
+		'G' | 'g' => (&[Dash, Dash, Dot], true),
+		'H' | 'h' => (&[Dot, Dot, Dot, Dot], true),
+		'I' | 'i' => (&[Dot, Dot], true),
+		'J' | 'j' => (&[Dot, Dash, Dash, Dash], true),
+		'K' | 'k' => (&[Dash, Dot, Dash], true),
+		'L' | 'l' => (&[Dot, Dash, Dot, Dot], true),
+		'M' | 'm' => (&[Dash, Dash], true),
+		'N' | 'n' => (&[Dash, Dot], true),
+		'O' | 'o' => (&[Dash, Dash, Dash], true),
+		'P' | 'p' => (&[Dot, Dash, Dash, Dot], true),
+		'Q' | 'q' => (&[Dash, Dash, Dot, Dash], true),
+		'R' | 'r' => (&[Dot, Dash, Dot], true),
+		'S' | 's' => (&[Dot, Dot, Dot], true),
+		'T' | 't' => (&[Dash], true),
+		'U' | 'u' => (&[Dot, Dot, Dash], true),
+		'V' | 'v' => (&[Dot, Dot, Dot, Dash], true),
+		'W' | 'w' => (&[Dot, Dash, Dash], true),
+		'X' | 'x' => (&[Dash, Dot, Dot, Dash], true),
+		'Y' | 'y' => (&[Dash, Dot, Dash, Dash], true),
+		'Z' | 'z' => (&[Dash, Dash, Dot, Dot], true),
+		'1' => (&[Dot, Dash, Dash, Dash, Dash], true),
+		'2' => (&[Dot, Dot, Dash, Dash, Dash], true),
+		'3' => (&[Dot, Dot, Dot, Dash, Dash], true),
+		'4' => (&[Dot, Dot, Dot, Dot, Dash], true),
+		'5' => (&[Dot, Dot, Dot, Dot, Dot], true),
+		'6' => (&[Dash, Dot, Dot, Dot, Dot], true),
+		'7' => (&[Dash, Dash, Dot, Dot, Dot], true),
+		'8' => (&[Dash, Dash, Dash, Dot, Dot], true),
+		'9' => (&[Dash, Dash, Dash, Dash, Dot], true),
+		'0' => (&[Dash, Dash, Dash, Dash, Dash], true),
+		_ => (&[Dash, Dash, Dot, Dash, Dash], false),
 	}
 }
 
