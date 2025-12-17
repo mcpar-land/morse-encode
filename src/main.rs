@@ -15,6 +15,9 @@ struct Cli {
 	/// When encountering an unknown character, encode it as "- - . - - "
 	#[arg(long, short)]
 	unknown: bool,
+	/// insert STOP in place of periods and newlines.
+	#[arg(long, short)]
+	stop: bool,
 }
 
 #[derive(Args)]
@@ -46,6 +49,13 @@ fn main() -> std::io::Result<()> {
 		(false, true) | (false, false) => {
 			let mut s = String::new();
 			stdin().read_to_string(&mut s)?;
+
+			if cli.stop {
+				let stop_re =
+					regex::Regex::new(r"([^\s])(\. |\n+)").expect("invalid regex");
+				s = stop_re.replace_all(&s, "$1 STOP ").to_string();
+			}
+
 			CharToSignalIterator::new(s.chars(), !cli.unknown).write(stdout())?;
 			Ok(())
 		}
@@ -250,7 +260,6 @@ impl<I: Iterator<Item = char>> Iterator for CharToSignalIterator<I> {
 			}
 		}
 		let item = self.buf.pop_front().expect("buf should not be empty here");
-		eprint!("{}", item);
 		Some(item)
 	}
 }
